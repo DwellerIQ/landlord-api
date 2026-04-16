@@ -1,3 +1,5 @@
 openai
 supabase
 anthropic
+uvicorn
+fastapi
