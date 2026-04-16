@@ -32,7 +32,18 @@ def get_relevant_chunks(question, num_chunks=5):
     }).execute()
 
     return result.data
+from fastapi.responses import Response
 
+@app.options("/api/chat")
+async def options_chat():
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        }
+    )
 @app.post("/api/chat")
 async def chat(request: Request):
     body = await request.json()
