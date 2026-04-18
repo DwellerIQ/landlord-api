@@ -70,8 +70,11 @@ LEGAL CONTEXT:
     # Build messages array with full conversation history
     messages = []
 
+    # Cap history to last 6 messages (3 exchanges) to control token costs
+    capped_history = history[-6:] if len(history) > 6 else history
+
     # Add previous conversation history
-    for msg in history:
+    for msg in capped_history:
         messages.append({
             "role": msg["role"],
             "content": msg["content"]
