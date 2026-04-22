@@ -9,6 +9,15 @@ import json
 import uuid
 from datetime import datetime
 
+@app.get("/api/debug-env")
+async def debug_env():
+    return {
+        "stripe_payment_link_set": bool(os.environ.get("STRIPE_PAYMENT_LINK", "")),
+        "stripe_payment_link_length": len(os.environ.get("STRIPE_PAYMENT_LINK", "")),
+        "stripe_key_set": bool(os.environ.get("STRIPE_SECRET_KEY", "")),
+        "openai_key_set": bool(os.environ.get("OPENAI_API_KEY", ""))
+    }
+
 app = FastAPI()
 
 app.add_middleware(
