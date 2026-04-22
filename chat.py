@@ -26,7 +26,7 @@ app.add_middleware(
 openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 claude_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
+stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
 NOTICE_KEYWORDS = [
     "five-day notice", "5-day notice", "10-day notice", "ten-day notice",
