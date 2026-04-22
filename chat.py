@@ -4,15 +4,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from supabase import create_client
 import anthropic
-import stripe
 import os
 import json
 import uuid
 from datetime import datetime
-
-openai_client = OpenAI(api_key=os.environ.get(""))
-supabase = create_client(os.environ.get("SUPABASE_URL", ""), os.environ.get("SUPABASE_KEY", ""))
-claude_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
 app = FastAPI()
 
@@ -22,11 +17,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
-claude_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
 NOTICE_KEYWORDS = [
     "five-day notice", "5-day notice", "10-day notice", "ten-day notice",
@@ -43,7 +33,17 @@ NOTICE_TYPES = {
     "foreclosure": "Notice of Foreclosure Action"
 }
 
+def get_clients():
+    openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
+    supabase = create_client(
+        os.environ.get("SUPABASE_URL", ""),
+        os.environ.get("SUPABASE_KEY", "")
+    )
+    claude_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+    return openai_client, supabase, claude_client
+
 def get_relevant_chunks(question, num_chunks=5):
+    openai_client, supabase, _ = get_clients()
     response = openai_client.embeddings.create(
         model="text-embedding-3-small",
         input=question
@@ -91,6 +91,7 @@ async def options_chat():
 
 @app.post("/api/chat")
 async def chat(request: Request):
+    openai_client, supabase, claude_client = get_clients()
     body = await request.json()
     question = body.get("question", "")
     history = body.get("history", [])
@@ -156,16 +157,14 @@ async def options_payment():
 
 @app.post("/api/create-payment")
 async def create_payment(request: Request):
-    stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
+    _, supabase, _ = get_clients()
     body = await request.json()
     notice_type = body.get("notice_type", "")
     conversation_history = body.get("history", [])
     notice_details = body.get("notice_details", {})
 
-    # Create a unique session ID for this notice request
     session_id = str(uuid.uuid4())
 
-    # Store pending notice request in Supabase
     supabase.table("notice_requests").insert({
         "session_id": session_id,
         "notice_type": notice_type,
@@ -175,7 +174,7 @@ async def create_payment(request: Request):
         "created_at": datetime.utcnow().isoformat()
     }).execute()
 
-    payment_link = os.environ["STRIPE_PAYMENT_LINK"]
+    payment_link = os.environ.get("STRIPE_PAYMENT_LINK", "")
 
     return {
         "payment_url": f"{payment_link}?client_reference_id={session_id}",
@@ -184,13 +183,16 @@ async def create_payment(request: Request):
 
 @app.post("/api/stripe-webhook")
 async def stripe_webhook(request: Request):
+    import stripe
     stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
+    _, supabase, _ = get_clients()
+
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
 
     try:
         event = stripe.Webhook.construct_event(
-            payload, sig_header, os.environ["STRIPE_WEBHOOK_SECRET"]
+            payload, sig_header, os.environ.get("STRIPE_WEBHOOK_SECRET", "")
         )
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
@@ -200,7 +202,6 @@ async def stripe_webhook(request: Request):
         session_id = session.get("client_reference_id")
 
         if session_id:
-            # Get the pending notice request
             result = supabase.table("notice_requests").select("*").eq("session_id", session_id).execute()
 
             if result.data:
@@ -209,10 +210,8 @@ async def stripe_webhook(request: Request):
                 history = json.loads(notice_request["conversation_history"])
                 details = json.loads(notice_request["notice_details"])
 
-                # Generate the notice
                 notice_content = await generate_notice_content(notice_type, history, details)
 
-                # Save completed notice
                 supabase.table("notice_requests").update({
                     "status": "completed",
                     "notice_content": notice_content,
@@ -222,6 +221,7 @@ async def stripe_webhook(request: Request):
     return {"status": "ok"}
 
 async def generate_notice_content(notice_type, history, details):
+    openai_client, _, claude_client = get_clients()
     chunks = get_relevant_chunks(f"landlord notice {notice_type} Chicago Illinois requirements")
     context = "\n\n".join([chunk["content"] for chunk in chunks])
 
@@ -272,6 +272,7 @@ async def options_get_notice():
 
 @app.post("/api/get-notice")
 async def get_notice(request: Request):
+    _, supabase, _ = get_clients()
     body = await request.json()
     session_id = body.get("session_id", "")
 
@@ -298,12 +299,5 @@ async def get_notice(request: Request):
 
 @app.get("/api/documents/{user_id}")
 async def get_documents(user_id: str):
-    result = supabase.table("notice_requests").select(
-        "session_id, notice_type, notice_type_label, created_at, status"
-    ).eq("user_id", user_id).eq("status", "completed").order("created_at", desc=True).execute()
-
-    return {"documents": result.data}
-
-@app.get("/")
-async def root():
-    return {"status": "Landlord API is running"}
+    _, supabase, _ = get_clients()
+    result = su
