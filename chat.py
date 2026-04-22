@@ -10,6 +10,11 @@ import json
 import uuid
 from datetime import datetime
 
+openai_client = OpenAI(api_key=os.environ.get(""))
+supabase = create_client(os.environ.get("SUPABASE_URL", ""), os.environ.get("SUPABASE_KEY", ""))
+claude_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
+
 app = FastAPI()
 
 app.add_middleware(
