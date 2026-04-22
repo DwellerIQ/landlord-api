@@ -13,7 +13,6 @@ from datetime import datetime
 openai_client = OpenAI(api_key=os.environ.get(""))
 supabase = create_client(os.environ.get("SUPABASE_URL", ""), os.environ.get("SUPABASE_KEY", ""))
 claude_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
-stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
 app = FastAPI()
 
@@ -157,6 +156,7 @@ async def options_payment():
 
 @app.post("/api/create-payment")
 async def create_payment(request: Request):
+    stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
     body = await request.json()
     notice_type = body.get("notice_type", "")
     conversation_history = body.get("history", [])
@@ -184,6 +184,7 @@ async def create_payment(request: Request):
 
 @app.post("/api/stripe-webhook")
 async def stripe_webhook(request: Request):
+    stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
 
