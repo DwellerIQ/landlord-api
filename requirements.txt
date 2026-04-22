@@ -3,3 +3,4 @@ supabase
 anthropic
 uvicorn
 fastapi
+stripe
