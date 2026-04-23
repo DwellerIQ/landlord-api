@@ -9,15 +9,6 @@ import json
 import uuid
 from datetime import datetime
 
-@app.get("/api/debug-env")
-async def debug_env():
-    return {
-        "stripe_payment_link_set": bool(os.environ.get("STRIPE_PAYMENT_LINK", "")),
-        "stripe_payment_link_length": len(os.environ.get("STRIPE_PAYMENT_LINK", "")),
-        "stripe_key_set": bool(os.environ.get("STRIPE_SECRET_KEY", "")),
-        "openai_key_set": bool(os.environ.get("OPENAI_API_KEY", ""))
-    }
-
 app = FastAPI()
 
 app.add_middleware(
@@ -58,13 +49,11 @@ def get_relevant_chunks(question, num_chunks=5):
         input=question
     )
     question_embedding = response.data[0].embedding
-
     result = supabase.rpc("match_documents", {
         "query_embedding": question_embedding,
         "match_threshold": 0.5,
         "match_count": num_chunks
     }).execute()
-
     return result.data
 
 def detect_notice_needed(answer):
@@ -86,6 +75,21 @@ def detect_notice_type(answer):
         return "foreclosure"
     else:
         return "termination"
+
+@app.get("/")
+async def root():
+    return {"status": "Landlord API is running"}
+
+@app.get("/api/debug-env")
+async def debug_env():
+    return {
+        "stripe_payment_link_set": bool(os.environ.get("STRIPE_PAYMENT_LINK", "")),
+        "stripe_payment_link_length": len(os.environ.get("STRIPE_PAYMENT_LINK", "")),
+        "stripe_key_set": bool(os.environ.get("STRIPE_SECRET_KEY", "")),
+        "openai_key_set": bool(os.environ.get("OPENAI_API_KEY", "")),
+        "supabase_url_set": bool(os.environ.get("SUPABASE_URL", "")),
+        "anthropic_key_set": bool(os.environ.get("ANTHROPIC_API_KEY", ""))
+    }
 
 @app.options("/api/chat")
 async def options_chat():
@@ -121,18 +125,10 @@ LEGAL CONTEXT:
 {context}"""
 
     capped_history = history[-6:] if len(history) > 6 else history
-
     messages = []
     for msg in capped_history:
-        messages.append({
-            "role": msg["role"],
-            "content": msg["content"]
-        })
-
-    messages.append({
-        "role": "user",
-        "content": question
-    })
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": question})
 
     message = claude_client.messages.create(
         model="claude-sonnet-4-20250514",
@@ -218,7 +214,6 @@ async def stripe_webhook(request: Request):
                 notice_type = notice_request["notice_type"]
                 history = json.loads(notice_request["conversation_history"])
                 details = json.loads(notice_request["notice_details"])
-
                 notice_content = await generate_notice_content(notice_type, history, details)
 
                 supabase.table("notice_requests").update({
@@ -230,7 +225,7 @@ async def stripe_webhook(request: Request):
     return {"status": "ok"}
 
 async def generate_notice_content(notice_type, history, details):
-    openai_client, _, claude_client = get_clients()
+    _, _, claude_client = get_clients()
     chunks = get_relevant_chunks(f"landlord notice {notice_type} Chicago Illinois requirements")
     context = "\n\n".join([chunk["content"] for chunk in chunks])
 
@@ -253,10 +248,10 @@ NOTICE DETAILS PROVIDED:
 Generate a complete, professional notice document. Include:
 - Proper heading and title
 - Date line
-- Landlord and tenant information fields (use placeholders like [LANDLORD NAME] if not provided)
+- Landlord and tenant information fields
 - The full legal notice text with all required information per Chicago RLTO
 - Signature line
-- Important legal disclaimer at the bottom
+- Legal disclaimer at the bottom
 
 Format it cleanly as a formal document."""
 
@@ -309,4 +304,8 @@ async def get_notice(request: Request):
 @app.get("/api/documents/{user_id}")
 async def get_documents(user_id: str):
     _, supabase, _ = get_clients()
-    result = su
+    result = supabase.table("notice_requests").select(
+        "session_id, notice_type, created_at, status"
+    ).eq("user_id", user_id).eq("status", "completed").order("created_at", desc=True).execute()
+
+    return {"documents": result.data}
