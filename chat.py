@@ -3,13 +3,20 @@ from fastapi.responses import Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from supabase import create_client
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import anthropic
 import os
 import json
 import uuid
 from datetime import datetime
 
+limiter = Limiter(key_func=get_remote_address)
+
 app = FastAPI()
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -103,6 +110,7 @@ async def options_chat():
     )
 
 @app.post("/api/chat")
+@limiter.limit("20/hour")
 async def chat(request: Request):
     openai_client, supabase, claude_client = get_clients()
     body = await request.json()
@@ -130,14 +138,26 @@ LEGAL CONTEXT:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": question})
 
-    message = claude_client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1024,
-        system=system_prompt,
-        messages=messages
-    )
+    try:
+        message = claude_client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            system=system_prompt,
+            messages=messages
+        )
+        answer = message.content[0].text
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "rate" in error_msg or "limit" in error_msg or "overload" in error_msg:
+            return JSONResponse(
+                status_code=429,
+                content={"error": "high_demand", "message": "We're experiencing high demand right now. Please try again in a moment."}
+            )
+        return JSONResponse(
+            status_code=500,
+            content={"error": "server_error", "message": "Something went wrong. Please try again."}
+        )
 
-    answer = message.content[0].text
     notice_needed = detect_notice_needed(answer)
     notice_type = detect_notice_type(answer) if notice_needed else None
 
@@ -161,6 +181,7 @@ async def options_payment():
     )
 
 @app.post("/api/create-payment")
+@limiter.limit("5/day")
 async def create_payment(request: Request):
     _, supabase, _ = get_clients()
     body = await request.json()
