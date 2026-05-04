@@ -4,3 +4,4 @@ anthropic
 uvicorn
 fastapi
 stripe
+slowapi
