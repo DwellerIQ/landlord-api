@@ -29,7 +29,13 @@ NOTICE_KEYWORDS = [
     "five-day notice", "5-day notice", "10-day notice", "ten-day notice",
     "written notice", "notice to terminate", "notice of termination",
     "eviction notice", "notice to quit", "entry notice", "notice of entry",
-    "notice to cure", "notice to pay"
+    "notice to cure", "notice to pay",
+    "provide notice", "send notice", "serve notice", "issue a notice",
+    "send a written", "provide written", "written notification",
+    "notify the tenant", "notify your tenant", "must notify",
+    "notice of abandoned", "notice regarding", "notice of entry",
+    "notice of non-renewal", "non-renewal notice", "notice to vacate",
+    "notice of rent increase", "rent increase notice"
 ]
 
 NOTICE_TYPES = {
@@ -37,7 +43,9 @@ NOTICE_TYPES = {
     "lease_violation": "10-Day Notice to Cure Lease Violation",
     "termination": "Notice of Termination of Tenancy",
     "entry": "Notice of Landlord Entry",
-    "foreclosure": "Notice of Foreclosure Action"
+    "foreclosure": "Notice of Foreclosure Action",
+    "rent_increase": "Notice of Rent Increase",
+    "non_renewal": "Notice of Non-Renewal of Lease"
 }
 
 def get_clients():
@@ -76,6 +84,10 @@ def detect_notice_type(answer):
         return "non_payment"
     elif "10-day" in answer_lower or "ten-day" in answer_lower or "lease violation" in answer_lower:
         return "lease_violation"
+    elif "rent increase" in answer_lower or "raise the rent" in answer_lower or "increase rent" in answer_lower:
+        return "rent_increase"
+    elif "non-renewal" in answer_lower or "not renew" in answer_lower or "renewal notice" in answer_lower:
+        return "non_renewal"
     elif "entry" in answer_lower or "enter" in answer_lower or "access" in answer_lower:
         return "entry"
     elif "foreclosure" in answer_lower:
