@@ -49,7 +49,7 @@ def get_clients():
     claude_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
     return openai_client, supabase, claude_client
 
-def get_relevant_chunks(question, num_chunks=5):
+def get_relevant_chunks(question, num_chunks=8):
     openai_client, supabase, _ = get_clients()
     response = openai_client.embeddings.create(
         model="text-embedding-3-small",
@@ -58,7 +58,7 @@ def get_relevant_chunks(question, num_chunks=5):
     question_embedding = response.data[0].embedding
     result = supabase.rpc("match_documents", {
         "query_embedding": question_embedding,
-        "match_threshold": 0.5,
+        "match_threshold": 0.35,
         "match_count": num_chunks
     }).execute()
     return result.data
@@ -123,11 +123,11 @@ async def chat(request: Request):
     chunks = get_relevant_chunks(question)
     context = "\n\n".join([chunk["content"] for chunk in chunks])
 
-    system_prompt = f"""You are a knowledgeable assistant helping Chicago and Illinois landlords understand their legal rights and responsibilities.
+    system_prompt = f"""You are a Chicago and Illinois landlord-tenant law expert. Answer questions directly and completely.
 
-Use ONLY the following legal text to answer questions. If the answer is not in the provided text, say so clearly and recommend consulting an attorney.
+Use the legal context below as your primary source and cite specific ordinance sections when relevant. If the context covers the question, use it. If the context is sparse or silent on a topic, answer from your knowledge of Chicago and Illinois landlord-tenant law — do not refuse to answer just because the retrieved context is incomplete.
 
-Keep your answers conversational, practical and concise. Avoid heavy formatting with lots of headers. Use plain paragraphs with occasional bullet points only when listing multiple distinct items. Always reference specific ordinance sections when relevant.
+Match answer length to the question. No filler, no padding. Only recommend consulting an attorney for litigation strategy or genuinely unique fact patterns outside standard Chicago/Cook County/Illinois landlord-tenant law.
 
 LEGAL CONTEXT:
 {context}"""
