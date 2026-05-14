@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.responses import Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
@@ -10,21 +10,70 @@ import anthropic
 import os
 import json
 import uuid
+import time
+from collections import defaultdict
 from datetime import datetime
 
+# ‚îÄ‚îÄ Startup: initialize shared clients once ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+_openai = None
+_supabase = None
+_claude = None
+
+def get_clients():
+    global _openai, _supabase, _claude
+    if _openai is None:
+        _openai = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    if _supabase is None:
+        _supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+    if _claude is None:
+        _claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    return _openai, _supabase, _claude
+
+# ‚îÄ‚îÄ Rate limiting ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 limiter = Limiter(key_func=get_remote_address)
 
+# In-memory per-member hourly limit (resets on restart; fine for 1 replica)
+_member_request_times: dict = defaultdict(list)
+MEMBER_HOURLY_LIMIT = int(os.environ.get("MEMBER_HOURLY_LIMIT", "20"))
+
+def check_member_rate_limit(member_id: str) -> bool:
+    now = time.time()
+    cutoff = now - 3600
+    times = _member_request_times[member_id]
+    times[:] = [t for t in times if t > cutoff]
+    if len(times) >= MEMBER_HOURLY_LIMIT:
+        return False
+    times.append(now)
+    return True
+
+# ‚îÄ‚îÄ App setup ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 app = FastAPI()
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+ALLOWED_ORIGINS = [
+    "https://dwelleriq.com",
+    "https://www.dwelleriq.com",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-DIQ-Key"],
 )
 
+# ‚îÄ‚îÄ Auth dependency ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+_DIQ_API_KEY = os.environ.get("DIQ_API_KEY", "")
+
+async def require_api_key(request: Request):
+    if not _DIQ_API_KEY:
+        return  # key not configured ‚Äî open in dev mode
+    key = request.headers.get("X-DIQ-Key", "")
+    if key != _DIQ_API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+# ‚îÄ‚îÄ Domain data ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 NOTICE_KEYWORDS = [
     "five-day notice", "5-day notice", "10-day notice", "ten-day notice",
     "written notice", "notice to terminate", "notice of termination",
@@ -48,15 +97,7 @@ NOTICE_TYPES = {
     "non_renewal": "Notice of Non-Renewal of Lease"
 }
 
-def get_clients():
-    openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
-    supabase = create_client(
-        os.environ.get("SUPABASE_URL", ""),
-        os.environ.get("SUPABASE_KEY", "")
-    )
-    claude_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
-    return openai_client, supabase, claude_client
-
+# ‚îÄ‚îÄ Helpers ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 def get_relevant_chunks(question, num_chunks=8):
     openai_client, supabase, _ = get_clients()
     response = openai_client.embeddings.create(
@@ -95,49 +136,38 @@ def detect_notice_type(answer):
     else:
         return "termination"
 
+# ‚îÄ‚îÄ Routes ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 @app.get("/")
 async def root():
-    return {"status": "Landlord API is running"}
+    return {"status": "ok"}
 
-@app.get("/api/debug-env")
-async def debug_env():
-    return {
-        "stripe_payment_link_set": bool(os.environ.get("STRIPE_PAYMENT_LINK", "")),
-        "stripe_payment_link_length": len(os.environ.get("STRIPE_PAYMENT_LINK", "")),
-        "stripe_key_set": bool(os.environ.get("STRIPE_SECRET_KEY", "")),
-        "openai_key_set": bool(os.environ.get("OPENAI_API_KEY", "")),
-        "supabase_url_set": bool(os.environ.get("SUPABASE_URL", "")),
-        "anthropic_key_set": bool(os.environ.get("ANTHROPIC_API_KEY", ""))
-    }
-
-@app.options("/api/chat")
-async def options_chat():
-    return Response(
-        status_code=200,
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization",
-        }
-    )
-
-@app.post("/api/chat")
-@limiter.limit("20/hour")
+@app.post("/api/chat", dependencies=[Depends(require_api_key)])
+@limiter.limit("30/hour")
 async def chat(request: Request):
     openai_client, supabase, claude_client = get_clients()
     body = await request.json()
     question = body.get("question", "")
     history = body.get("history", [])
+    member_id = body.get("member_id", "anonymous")
 
     if not question:
-        return {"error": "No question provided"}
+        return JSONResponse(status_code=400, content={"error": "No question provided"})
+
+    if len(question) > 2000:
+        return JSONResponse(status_code=400, content={"error": "Message too long (max 2000 characters)"})
+
+    if not check_member_rate_limit(member_id):
+        return JSONResponse(
+            status_code=429,
+            content={"error": "rate_limited", "message": f"Limit of {MEMBER_HOURLY_LIMIT} questions per hour reached. Please try again later."}
+        )
 
     chunks = get_relevant_chunks(question)
     context = "\n\n".join([chunk["content"] for chunk in chunks])
 
     system_prompt = f"""You are a Chicago and Illinois landlord-tenant law expert. Answer questions directly and completely.
 
-Use the legal context below as your primary source and cite specific ordinance sections when relevant. If the context covers the question, use it. If the context is sparse or silent on a topic, answer from your knowledge of Chicago and Illinois landlord-tenant law — do not refuse to answer just because the retrieved context is incomplete.
+Use the legal context below as your primary source and cite specific ordinance sections when relevant. If the context covers the question, use it. If the context is sparse or silent on a topic, answer from your knowledge of Chicago and Illinois landlord-tenant law ‚Äî do not refuse to answer just because the retrieved context is incomplete.
 
 Match answer length to the question. No filler, no padding. Only recommend consulting an attorney for litigation strategy or genuinely unique fact patterns outside standard Chicago/Cook County/Illinois landlord-tenant law.
 
@@ -145,9 +175,7 @@ LEGAL CONTEXT:
 {context}"""
 
     capped_history = history[-6:] if len(history) > 6 else history
-    messages = []
-    for msg in capped_history:
-        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages = [{"role": msg["role"], "content": msg["content"]} for msg in capped_history]
     messages.append({"role": "user", "content": question})
 
     try:
@@ -181,18 +209,7 @@ LEGAL CONTEXT:
         "notice_type_label": NOTICE_TYPES.get(notice_type, "") if notice_type else ""
     }
 
-@app.options("/api/create-payment")
-async def options_payment():
-    return Response(
-        status_code=200,
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization",
-        }
-    )
-
-@app.post("/api/create-payment")
+@app.post("/api/create-payment", dependencies=[Depends(require_api_key)])
 @limiter.limit("5/day")
 async def create_payment(request: Request):
     _, supabase, _ = get_clients()
@@ -296,25 +313,14 @@ Format it cleanly as a formal document."""
 
     return message.content[0].text
 
-@app.options("/api/get-notice")
-async def options_get_notice():
-    return Response(
-        status_code=200,
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization",
-        }
-    )
-
-@app.post("/api/get-notice")
+@app.post("/api/get-notice", dependencies=[Depends(require_api_key)])
 async def get_notice(request: Request):
     _, supabase, _ = get_clients()
     body = await request.json()
     session_id = body.get("session_id", "")
 
     if not session_id:
-        return {"error": "No session ID provided"}
+        return JSONResponse(status_code=400, content={"error": "No session ID provided"})
 
     result = supabase.table("notice_requests").select("*").eq("session_id", session_id).execute()
 
@@ -334,8 +340,8 @@ async def get_notice(request: Request):
         "created_at": notice["created_at"]
     }
 
-@app.get("/api/documents/{user_id}")
-async def get_documents(user_id: str):
+@app.get("/api/documents/{user_id}", dependencies=[Depends(require_api_key)])
+async def get_documents(user_id: str, request: Request):
     _, supabase, _ = get_clients()
     result = supabase.table("notice_requests").select(
         "session_id, notice_type, created_at, status"
