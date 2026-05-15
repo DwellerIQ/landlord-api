@@ -7,6 +7,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 import anthropic
+import httpx
 import os
 import json
 import uuid
@@ -32,7 +33,6 @@ def get_clients():
 # ‚îÄ‚îÄ Rate limiting ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 limiter = Limiter(key_func=get_remote_address)
 
-# In-memory per-member hourly limit (resets on restart; fine for 1 replica)
 _member_request_times: dict = defaultdict(list)
 MEMBER_HOURLY_LIMIT = int(os.environ.get("MEMBER_HOURLY_LIMIT", "20"))
 
@@ -63,15 +63,66 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization", "X-DIQ-Key"],
 )
 
-# ‚îÄ‚îÄ Auth dependency ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+# ‚îÄ‚îÄ Auth ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 _DIQ_API_KEY = os.environ.get("DIQ_API_KEY", "")
 
-async def require_api_key(request: Request):
-    if not _DIQ_API_KEY:
-        return  # key not configured ‚Äî open in dev mode
-    key = request.headers.get("X-DIQ-Key", "")
-    if key != _DIQ_API_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+# Token verification cache: {token: (member_id, expiry)}
+_token_cache: dict = {}
+TOKEN_CACHE_TTL = 300  # 5 minutes
+
+async def verify_memberstack_token(token: str) -> str | None:
+    """Call Memberstack's API to verify a JWT. Returns member_id or None."""
+    if token in _token_cache:
+        member_id, expiry = _token_cache[token]
+        if time.time() < expiry:
+            return member_id
+        del _token_cache[token]
+
+    ms_key = os.environ.get("MEMBERSTACK_SECRET_KEY", "")
+    if not ms_key:
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                "https://admin.memberstack.com/members/verify-token",
+                json={"token": token},
+                headers={"x-api-key": ms_key, "Content-Type": "application/json"},
+            )
+        if resp.status_code == 200:
+            data = resp.json().get("data", {})
+            member_id = data.get("id")
+            if member_id:
+                _token_cache[token] = (member_id, time.time() + TOKEN_CACHE_TTL)
+                return member_id
+    except Exception:
+        pass
+    return None
+
+async def require_auth(request: Request) -> str:
+    """
+    Validates the request and returns the verified member_id.
+    - Always checks X-DIQ-Key if DIQ_API_KEY is configured.
+    - If MEMBERSTACK_SECRET_KEY is configured, also requires a valid
+      Memberstack JWT in the Authorization: Bearer header.
+    """
+    if _DIQ_API_KEY:
+        if request.headers.get("X-DIQ-Key", "") != _DIQ_API_KEY:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    ms_key = os.environ.get("MEMBERSTACK_SECRET_KEY", "")
+    if ms_key:
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Authentication required")
+        token = auth_header[7:]
+        member_id = await verify_memberstack_token(token)
+        if not member_id:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        return member_id
+
+    # MS key not configured yet ‚Äî fall back to member_id from body
+    return ""
 
 # ‚îÄ‚îÄ Domain data ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 NOTICE_KEYWORDS = [
@@ -141,14 +192,15 @@ def detect_notice_type(answer):
 async def root():
     return {"status": "ok"}
 
-@app.post("/api/chat", dependencies=[Depends(require_api_key)])
+@app.post("/api/chat")
 @limiter.limit("30/hour")
-async def chat(request: Request):
+async def chat(request: Request, verified_member_id: str = Depends(require_auth)):
     openai_client, supabase, claude_client = get_clients()
     body = await request.json()
     question = body.get("question", "")
     history = body.get("history", [])
-    member_id = body.get("member_id", "anonymous")
+    # Use server-verified member_id; fall back to client-supplied only if MS key not set
+    member_id = verified_member_id or body.get("member_id", "anonymous")
 
     if not question:
         return JSONResponse(status_code=400, content={"error": "No question provided"})
@@ -209,9 +261,9 @@ LEGAL CONTEXT:
         "notice_type_label": NOTICE_TYPES.get(notice_type, "") if notice_type else ""
     }
 
-@app.post("/api/create-payment", dependencies=[Depends(require_api_key)])
+@app.post("/api/create-payment")
 @limiter.limit("5/day")
-async def create_payment(request: Request):
+async def create_payment(request: Request, _: str = Depends(require_auth)):
     _, supabase, _ = get_clients()
     body = await request.json()
     notice_type = body.get("notice_type", "")
@@ -313,8 +365,8 @@ Format it cleanly as a formal document."""
 
     return message.content[0].text
 
-@app.post("/api/get-notice", dependencies=[Depends(require_api_key)])
-async def get_notice(request: Request):
+@app.post("/api/get-notice")
+async def get_notice(request: Request, _: str = Depends(require_auth)):
     _, supabase, _ = get_clients()
     body = await request.json()
     session_id = body.get("session_id", "")
@@ -340,8 +392,8 @@ async def get_notice(request: Request):
         "created_at": notice["created_at"]
     }
 
-@app.get("/api/documents/{user_id}", dependencies=[Depends(require_api_key)])
-async def get_documents(user_id: str, request: Request):
+@app.get("/api/documents/{user_id}")
+async def get_documents(user_id: str, request: Request, _: str = Depends(require_auth)):
     _, supabase, _ = get_clients()
     result = supabase.table("notice_requests").select(
         "session_id, notice_type, created_at, status"
