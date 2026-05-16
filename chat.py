@@ -34,17 +34,20 @@ def get_clients():
 limiter = Limiter(key_func=get_remote_address)
 
 _member_request_times: dict = defaultdict(list)
-MEMBER_HOURLY_LIMIT = int(os.environ.get("MEMBER_HOURLY_LIMIT", "20"))
+MEMBER_HOURLY_LIMIT = int(os.environ.get("MEMBER_HOURLY_LIMIT", "10"))
+MEMBER_DAILY_LIMIT = int(os.environ.get("MEMBER_DAILY_LIMIT", "25"))
 
-def check_member_rate_limit(member_id: str) -> bool:
+def check_member_rate_limit(member_id: str) -> str | None:
+    """Returns None if allowed, otherwise a user-facing limit message."""
     now = time.time()
-    cutoff = now - 3600
     times = _member_request_times[member_id]
-    times[:] = [t for t in times if t > cutoff]
-    if len(times) >= MEMBER_HOURLY_LIMIT:
-        return False
+    times[:] = [t for t in times if t > now - 86400]
+    if len(times) >= MEMBER_DAILY_LIMIT:
+        return f"Daily limit of {MEMBER_DAILY_LIMIT} questions reached. Your limit resets in 24 hours."
+    if sum(1 for t in times if t > now - 3600) >= MEMBER_HOURLY_LIMIT:
+        return f"Limit of {MEMBER_HOURLY_LIMIT} questions per hour reached. Please try again later."
     times.append(now)
-    return True
+    return None
 
 # ‚îÄ‚îÄ App setup ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 app = FastAPI()
@@ -208,13 +211,14 @@ async def chat(request: Request, verified_member_id: str = Depends(require_auth)
     if len(question) > 2000:
         return JSONResponse(status_code=400, content={"error": "Message too long (max 2000 characters)"})
 
-    if not check_member_rate_limit(member_id):
+    limit_message = check_member_rate_limit(member_id)
+    if limit_message:
         return JSONResponse(
             status_code=429,
-            content={"error": "rate_limited", "message": f"Limit of {MEMBER_HOURLY_LIMIT} questions per hour reached. Please try again later."}
+            content={"error": "rate_limited", "message": limit_message}
         )
 
-    chunks = get_relevant_chunks(question)
+    chunks = get_relevant_chunks(question, num_chunks=5)
     context = "\n\n".join([chunk["content"] for chunk in chunks])
 
     system_prompt = f"""You are a Chicago and Illinois landlord-tenant law expert. Answer questions directly and completely.
@@ -233,7 +237,7 @@ LEGAL CONTEXT:
     try:
         message = claude_client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=1024,
+            max_tokens=800,
             system=system_prompt,
             messages=messages
         )
