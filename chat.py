@@ -37,13 +37,29 @@ _member_request_times: dict = defaultdict(list)
 MEMBER_HOURLY_LIMIT = int(os.environ.get("MEMBER_HOURLY_LIMIT", "10"))
 MEMBER_DAILY_LIMIT = int(os.environ.get("MEMBER_DAILY_LIMIT", "25"))
 
+def _parse_limit_overrides() -> dict:
+    """Parse MEMBER_LIMIT_OVERRIDES, e.g. 'mem_abc:100, mem_xyz:60'."""
+    overrides = {}
+    for entry in os.environ.get("MEMBER_LIMIT_OVERRIDES", "").split(","):
+        entry = entry.strip()
+        if ":" in entry:
+            mid, _, val = entry.partition(":")
+            try:
+                overrides[mid.strip()] = int(val.strip())
+            except ValueError:
+                pass
+    return overrides
+
+MEMBER_LIMIT_OVERRIDES = _parse_limit_overrides()
+
 def check_member_rate_limit(member_id: str) -> str | None:
     """Returns None if allowed, otherwise a user-facing limit message."""
     now = time.time()
+    daily_limit = MEMBER_LIMIT_OVERRIDES.get(member_id, MEMBER_DAILY_LIMIT)
     times = _member_request_times[member_id]
     times[:] = [t for t in times if t > now - 86400]
-    if len(times) >= MEMBER_DAILY_LIMIT:
-        return f"Daily limit of {MEMBER_DAILY_LIMIT} questions reached. Your limit resets in 24 hours."
+    if len(times) >= daily_limit:
+        return f"Daily limit of {daily_limit} questions reached. Your limit resets in 24 hours."
     if sum(1 for t in times if t > now - 3600) >= MEMBER_HOURLY_LIMIT:
         return f"Limit of {MEMBER_HOURLY_LIMIT} questions per hour reached. Please try again later."
     times.append(now)
